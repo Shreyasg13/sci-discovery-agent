@@ -1,0 +1,5 @@
+timeframe: "1h"
+universe:
+  - "BTCUSDT"
+seed: 42
+notes: "Toy baseline config for testing pipeline"
