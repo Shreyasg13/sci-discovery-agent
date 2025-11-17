@@ -24,7 +24,8 @@ output "db_master_username" {
 }
 
 output "db_master_password" {
-  value       = random_password.db_master.result
-  description = "RDS master password"
+  value       = var.db_master_password
+  description = "RDS master password (from variable)"
   sensitive   = true
 }
+
