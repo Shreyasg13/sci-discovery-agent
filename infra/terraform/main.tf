@@ -144,11 +144,6 @@ resource "random_id" "bucket_suffix" {
 # RDS Postgres
 ########################
 
-resource "random_password" "db_master" {
-  length          = 20
-  special         = true
-  override_special = "!@#%^*-_+=?"
-}
 
 
 resource "aws_db_subnet_group" "default" {
@@ -200,13 +195,12 @@ resource "aws_security_group" "rds_sg" {
 resource "aws_db_instance" "postgres" {
   identifier        = "${var.project_prefix}-db"
   engine            = "postgres"
-  engine_version    = "15.5" # adjust if needed
   instance_class    = "db.t3.medium"
   allocated_storage = 100
 
   db_name  = "scidb"
   username = "sci_admin"
-  password = random_password.db_master.result
+  password = var.db_master_password   
 
   db_subnet_group_name   = aws_db_subnet_group.default.name
   vpc_security_group_ids = [aws_security_group.rds_sg.id]
@@ -221,3 +215,4 @@ resource "aws_db_instance" "postgres" {
     Project = var.project_prefix
   }
 }
+

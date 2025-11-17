@@ -19,3 +19,9 @@ variable "my_ip_cidr" {
   description = "Your IP address in CIDR notation for SSH (e.g., 1.2.3.4/32)"
   type        = string
 }
+
+variable "db_master_password" {
+  description = "Master password for RDS Postgres (must satisfy AWS RDS rules)"
+  type        = string
+  sensitive   = true
+}

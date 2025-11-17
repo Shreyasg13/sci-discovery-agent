@@ -1,0 +1,7 @@
+aws_profile         = "default"
+aws_region          = "us-east-1"
+db_master_username  = "sci_admin"
+db_master_password  = "CHANGE_ME_SAFE_PASSWORD"
+ssh_key_name        = "sci-agent-key"
+ssh_public_key_path = "~/.ssh/sci-agent-key.pub"
+my_ip_cidr          = "1.2.3.4/32"
