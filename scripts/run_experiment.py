@@ -7,6 +7,7 @@ import json
 import platform
 import subprocess
 from pathlib import Path
+from datetime import datetime, timezone
 
 
 def load_config(path: Path) -> dict:
@@ -21,8 +22,39 @@ def load_config(path: Path) -> dict:
     return config
 
 
+def partition_plan(config: dict) -> dict | None:
+    partitions = config.get("partitions")
+    if partitions is None:
+        return None
+    order = ("train", "validation", "test")
+    if type(partitions) is not dict or set(partitions) != set(order):
+        raise ValueError("partitions must contain train, validation, and test")
+    result = {}
+    previous_end = None
+    for name in order:
+        interval = partitions[name]
+        if type(interval) is not dict or set(interval) != {"start", "end"}:
+            raise ValueError(f"{name} requires start and end timestamps")
+        bounds = []
+        for value in (interval["start"], interval["end"]):
+            if type(value) is not str:
+                raise ValueError(f"{name} boundaries must be quoted ISO timestamps")
+            bound = datetime.fromisoformat(value)
+            if bound.utcoffset() is None:
+                raise ValueError(f"{name} boundaries must include a timezone")
+            bounds.append(bound.astimezone(timezone.utc))
+        start, end = bounds
+        if start >= end or (previous_end is not None and start < previous_end):
+            raise ValueError("partitions must be nonempty, chronological, and disjoint")
+        result[name] = {"start": start.isoformat(), "end": end.isoformat()}
+        previous_end = end
+    return result
+
+
+
 def experiment_plan(args: argparse.Namespace) -> dict:
     config = load_config(args.config)
+    partitions = partition_plan(config)
     repo = Path(__file__).resolve().parents[1]
     revision = subprocess.check_output(
         ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
@@ -33,6 +65,7 @@ def experiment_plan(args: argparse.Namespace) -> dict:
         "description": args.description,
         "strategy": args.strategy_name,
         "config": config,
+        "partitions_utc": partitions,
         "seed": config.get("seed", 42),
         "code_commit": revision,
         "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),

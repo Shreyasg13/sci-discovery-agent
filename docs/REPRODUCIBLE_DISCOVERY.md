@@ -14,3 +14,8 @@ Dataset provenance, walk-forward evaluation, a ledger, and evidence gates
 are required before a research champion can be selected. Roll back this
 change with a local revert only if the placeholder runner stays disconnected
 from any results database.
+
+Optionally provide a partitions mapping with train, validation, and test.
+Each window takes quoted ISO 8601 start and end timestamps with offsets.
+The plan checks chronological disjointness of half-open windows and emits
+their UTC boundaries. The evaluator must still enforce these windows.
