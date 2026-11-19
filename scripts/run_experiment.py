@@ -1,200 +1,109 @@
 #!/usr/bin/env python3
-"""
-Minimal experiment runner skeleton.
-
-Usage:
-    python scripts/run_experiment.py \
-      --name btc_1h_baseline \
-      --description "BTCUSDT 1h baseline test" \
-      --config configs/btc_1h_baseline.yaml \
-      --run-label "seed=42"
-"""
+"""Describe a reproducible experiment plan without publishing fabricated results."""
 
 import argparse
+import hashlib
 import json
-import logging
-import os
+import platform
+import subprocess
 import sys
+from pathlib import Path
 from datetime import datetime, timezone
 
-import yaml
-# Ensure project root is on sys.path so "db" can be imported when running as a script
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
-
-from db.connection import db_cursor
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from db.local_specs import store_spec
 
 
-def load_config(path: str) -> dict:
-    with open(path, "r") as f:
-        if path.endswith((".yaml", ".yml")):
-            return yaml.safe_load(f)
-        return json.load(f)
+def load_config(path: Path) -> dict:
+    with path.open(encoding="utf-8") as stream:
+        if path.suffix.lower() in (".yaml", ".yml"):
+            import yaml
+            config = yaml.safe_load(stream)
+        else:
+            config = json.load(stream)
+    if not isinstance(config, dict):
+        raise ValueError("experiment configuration must be a mapping")
+    return config
 
 
-def create_or_update_experiment(name: str, description: str, config: dict) -> int:
-    with db_cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO experiments (name, description, config_json)
-            VALUES (%s, %s, %s::jsonb)
-            ON CONFLICT (name)
-            DO UPDATE SET
-                description = EXCLUDED.description,
-                config_json = EXCLUDED.config_json
-            RETURNING id;
-            """,
-            (name, description, json.dumps(config)),
-        )
-        row = cur.fetchone()
-        experiment_id = row["id"]
-        logging.info("Using experiment_id=%s", experiment_id)
-        return experiment_id
+def partition_plan(config: dict) -> dict | None:
+    partitions = config.get("partitions")
+    if partitions is None:
+        return None
+    order = ("train", "validation", "test")
+    if type(partitions) is not dict or set(partitions) != set(order):
+        raise ValueError("partitions must contain train, validation, and test")
+    result = {}
+    previous_end = None
+    for name in order:
+        interval = partitions[name]
+        if type(interval) is not dict or set(interval) != {"start", "end"}:
+            raise ValueError(f"{name} requires start and end timestamps")
+        bounds = []
+        for value in (interval["start"], interval["end"]):
+            if type(value) is not str:
+                raise ValueError(f"{name} boundaries must be quoted ISO timestamps")
+            bound = datetime.fromisoformat(value)
+            if bound.utcoffset() is None:
+                raise ValueError(f"{name} boundaries must include a timezone")
+            bounds.append(bound.astimezone(timezone.utc))
+        start, end = bounds
+        if start >= end or (previous_end is not None and start < previous_end):
+            raise ValueError("partitions must be nonempty, chronological, and disjoint")
+        result[name] = {"start": start.isoformat(), "end": end.isoformat()}
+        previous_end = end
+    return result
 
 
-def start_experiment_run(experiment_id: int, run_label: str, params: dict) -> int:
-    with db_cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO experiment_runs (experiment_id, run_label, status, params_json)
-            VALUES (%s, %s, 'RUNNING', %s::jsonb)
-            RETURNING id;
-            """,
-            (experiment_id, run_label, json.dumps(params)),
-        )
-        row = cur.fetchone()
-        run_id = row["id"]
-        logging.info("Started experiment_run_id=%s", run_id)
-        return run_id
 
-
-def complete_experiment_run(run_id: int, status: str, metrics: dict, logs_ref: str | None = None, error_message: str | None = None):
-    finished_at = datetime.now(timezone.utc)
-    with db_cursor() as cur:
-        cur.execute(
-            """
-            UPDATE experiment_runs
-            SET status = %s,
-                finished_at = %s,
-                metrics_json = %s::jsonb,
-                logs_ref = %s,
-                error_message = %s
-            WHERE id = %s;
-            """,
-            (status, finished_at, json.dumps(metrics), logs_ref, error_message, run_id),
-        )
-    logging.info("Marked run %s as %s", run_id, status)
-
-
-def insert_backtest_result(run_id: int, strategy_name: str, metrics: dict):
-    with db_cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO backtest_results (
-                experiment_run_id,
-                strategy_name,
-                asset_universe,
-                train_period,
-                test_period,
-                sharpe_ratio,
-                sortino_ratio,
-                max_drawdown,
-                annual_return,
-                pnl_currency,
-                meta_json
-            )
-            VALUES (
-                %s,
-                %s,
-                %s,
-                tstzrange(%s, %s, '[)'),
-                tstzrange(%s, %s, '[)'),
-                %s,
-                %s,
-                %s,
-                %s,
-                %s,
-                %s::jsonb
-            )
-            RETURNING id;
-            """,
-            (
-                run_id,
-                strategy_name,
-                metrics.get("asset_universe", "UNKNOWN"),
-                metrics.get("train_start"),
-                metrics.get("train_end"),
-                metrics.get("test_start"),
-                metrics.get("test_end"),
-                metrics.get("sharpe_ratio"),
-                metrics.get("sortino_ratio"),
-                metrics.get("max_drawdown"),
-                metrics.get("annual_return"),
-                metrics.get("pnl_currency", "USD"),
-                json.dumps(metrics),
-            ),
-        )
-        row = cur.fetchone()
-        result_id = row["id"]
-        logging.info("Inserted backtest_results.id=%s", result_id)
-        return result_id
+def experiment_plan(args: argparse.Namespace) -> dict:
+    config = load_config(args.config)
+    partitions = partition_plan(config)
+    repo = Path(__file__).resolve().parents[1]
+    revision = subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+    ).strip()
+    spec = {
+        "schema_version": 1,
+        "name": args.name,
+        "description": args.description,
+        "strategy": args.strategy_name,
+        "config": config,
+        "partitions_utc": partitions,
+        "seed": config.get("seed", 42),
+        "code_commit": revision,
+        "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "python": platform.python_version(),
+    }
+    canonical = json.dumps(spec, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return {
+        "experiment_id": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        "spec": spec,
+        "run_label": args.run_label,
+        "status": "insufficient",
+        "reason": "No evaluator ran and no metrics were produced.",
+    }
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run a single experiment + backtest")
-    parser.add_argument("--name", required=True, help="Experiment name (unique)")
-    parser.add_argument("--description", default="", help="Experiment description")
-    parser.add_argument("--config", required=True, help="Path to JSON/YAML config file")
-    parser.add_argument("--run-label", default="", help="Label for this run (e.g. seed=42)")
-    parser.add_argument("--strategy-name", default="baseline_strategy", help="Strategy name label")
-
+    parser = argparse.ArgumentParser(description="Inspect an experiment plan")
+    parser.add_argument("--name", required=True)
+    parser.add_argument("--description", default="")
+    parser.add_argument("--config", required=True, type=Path)
+    parser.add_argument("--run-label", default="")
+    parser.add_argument("--strategy-name", default="baseline_strategy")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--ledger", type=Path, help="Optional local SQLite spec ledger")
     args = parser.parse_args()
-
-    config = load_config(args.config)
-
-    # Example: derive some params from config
-    params = {
-        "config_path": os.path.abspath(args.config),
-        "timeframe": config.get("timeframe"),
-        "universe": config.get("universe"),
-        "seed": config.get("seed", 42),
-    }
-
-    experiment_id = create_or_update_experiment(args.name, args.description, config)
-    run_id = start_experiment_run(experiment_id, args.run_label, params)
-
+    if not args.dry_run:
+        parser.error("this runner has no implemented evaluator; use --dry-run")
     try:
-        # TODO: here you plug in the real backtest / discovery logic
-        # For now we fake some metrics so the pipeline end-to-end works.
-
-        now = datetime.now(timezone.utc)
-        metrics = {
-            "sharpe_ratio": 1.23,
-            "sortino_ratio": 1.80,
-            "max_drawdown": -0.15,
-            "annual_return": 0.32,
-            "pnl_currency": "USD",
-            "asset_universe": ",".join(config.get("universe", ["BTCUSDT"])),
-            "train_start": now.replace(year=now.year - 2),
-            "train_end": now.replace(year=now.year - 1),
-            "test_start": now.replace(year=now.year - 1),
-            "test_end": now,
-            "timeframe": config.get("timeframe", "1h"),
-        }
-
-        insert_backtest_result(run_id, args.strategy_name, metrics)
-        complete_experiment_run(run_id, "DONE", metrics, logs_ref=None)
-
-    except Exception as e:
-        logging.exception("Experiment run failed")
-        complete_experiment_run(run_id, "FAILED", metrics={}, logs_ref=None, error_message=str(e))
-        raise
+        plan = experiment_plan(args)
+        if args.ledger is not None:
+            store_spec(args.ledger, plan["spec"])
+        print(json.dumps(plan, sort_keys=True, indent=2))
+    except (ValueError, TypeError, OSError, subprocess.CalledProcessError) as exc:
+        parser.error(str(exc))
 
 
 if __name__ == "__main__":
