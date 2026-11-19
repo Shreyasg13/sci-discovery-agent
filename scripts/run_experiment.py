@@ -6,8 +6,12 @@ import hashlib
 import json
 import platform
 import subprocess
+import sys
 from pathlib import Path
 from datetime import datetime, timezone
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from db.local_specs import store_spec
 
 
 def load_config(path: Path) -> dict:
@@ -89,11 +93,15 @@ def main():
     parser.add_argument("--run-label", default="")
     parser.add_argument("--strategy-name", default="baseline_strategy")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--ledger", type=Path, help="Optional local SQLite spec ledger")
     args = parser.parse_args()
     if not args.dry_run:
         parser.error("this runner has no implemented evaluator; use --dry-run")
     try:
-        print(json.dumps(experiment_plan(args), sort_keys=True, indent=2))
+        plan = experiment_plan(args)
+        if args.ledger is not None:
+            store_spec(args.ledger, plan["spec"])
+        print(json.dumps(plan, sort_keys=True, indent=2))
     except (ValueError, TypeError, OSError, subprocess.CalledProcessError) as exc:
         parser.error(str(exc))
 

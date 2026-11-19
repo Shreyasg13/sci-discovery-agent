@@ -19,3 +19,4 @@ Optionally provide a partitions mapping with train, validation, and test.
 Each window takes quoted ISO 8601 start and end timestamps with offsets.
 The plan checks chronological disjointness of half-open windows and emits
 their UTC boundaries. The evaluator must still enforce these windows.
+Pass --ledger PATH with --dry-run to store the spec in a local SQLite file. Replays retain the original record.
